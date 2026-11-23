@@ -1,0 +1,12 @@
+node_modules/
+dist/
+www/
+.codex/
+.agents/
+.env*
+*.jks
+*.keystore
+google-services.json
+*.log
+android/.kotlin/
+android/.idea/

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PATTS Offline POS</string>
+    <string name="title_activity_main">PATTS Offline POS</string>
+    <string name="package_name">ph.edu.patts.offlinepos</string>
+    <string name="custom_url_scheme">ph.edu.patts.offlinepos</string>
+</resources>

@@ -1,0 +1,11 @@
+{
+  "appId": "ph.edu.patts.offlinepos",
+  "appName": "PATTS Offline POS",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#123b2f"
+  }
+}
+

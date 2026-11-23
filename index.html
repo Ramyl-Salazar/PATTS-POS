@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#123b2f" />
+    <meta name="description" content="Offline PATTS student wallet and teller POS prototype." />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="preload" href="./vendor/geist-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>PATTS Offline POS</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#wallet" aria-label="PATTS POS wallet">
+          <span class="brand-mark" aria-hidden="true">P</span>
+          <span><strong>PATTS POS</strong><small>Offline wallet console</small></span>
+        </a>
+        <div class="topbar-actions">
+          <button class="operator-pill" id="operator-status" data-action="lock" title="Lock teller station" hidden></button>
+          <span class="status-pill" id="connection-status" role="status"><span class="status-dot" aria-hidden="true"></span><span>Offline ready</span></span>
+          <button class="button button-quiet install-button" id="install-button" hidden>Install app</button>
+        </div>
+      </header>
+      <main id="main" tabindex="-1">
+        <section class="prototype-banner" aria-label="Prototype notice"><span class="banner-light" aria-hidden="true"></span><strong>Prototype environment</strong><span>Demo balances only. No real money or physical card is processed.</span></section>
+        <div id="app" aria-live="polite"></div>
+      </main>
+      <nav class="bottom-nav" aria-label="Primary navigation">
+        <a href="#wallet" data-route="wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v11H4zM7 5h10v2.5H7zM15.5 12h3v2h-3z"/></svg><span>Wallet</span></a>
+        <a href="#students" data-route="students"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm8-1a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM2.5 19.5c0-3.7 2.2-6.5 5.5-6.5s5.5 2.8 5.5 6.5h-11Zm11.3 0c0-2-.6-3.8-1.7-5.1a5.1 5.1 0 0 1 3.9-1.7c3.2 0 5.5 2.7 5.5 6.8h-7.7Z"/></svg><span>Students</span></a>
+        <a href="#activity" data-route="activity"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18h3V9H4v9Zm6.5 0h3V4h-3v14Zm6.5 0h3v-6h-3v6Z"/></svg><span>Activity</span></a>
+        <a href="#settings" data-route="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9 4.8v-2.6l-2.3-.8-.5-1.2 1-2.2-1.8-1.8-2.2 1-1.2-.5-.8-2.3h-2.6l-.8 2.3-1.2.5-2.2-1-1.8 1.8 1 2.2-.5 1.2-2.3.8v2.6l2.3.8.5 1.2-1 2.2 1.8 1.8 2.2-1 1.2.5.8 2.3h2.6l.8-2.3 1.2-.5 2.2 1 1.8-1.8-1-2.2.5-1.2 2.3-.8Z"/></svg><span>Settings</span></a>
+      </nav>
+    </div>
+    <dialog id="student-dialog" class="dialog">
+      <form method="dialog" id="student-form">
+        <div class="dialog-head"><div><p class="eyebrow">New wallet</p><h2>Create student</h2></div><button class="icon-button" type="button" data-action="close-dialog" aria-label="Close dialog">×</button></div>
+        <label>Student ID<input name="id" required maxlength="30" autocomplete="off" placeholder="2026-0021" /></label>
+        <label>Full name<input name="name" required maxlength="80" autocomplete="name" placeholder="Student name" /></label>
+        <label>Program / section<input name="program" maxlength="80" placeholder="BS Aeronautical Engineering" /></label>
+        <label>Opening balance<input name="balance" inputmode="decimal" value="0.00" aria-describedby="opening-help" /></label>
+        <p class="field-help" id="opening-help">Use Philippine pesos, for example 500.00.</p>
+        <p class="form-error" id="student-form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="close-dialog">Cancel</button><button class="button button-primary" type="submit">Create wallet</button></div>
+      </form>
+    </dialog>
+    <dialog id="transaction-dialog" class="dialog transaction-dialog">
+      <form method="dialog" id="transaction-form">
+        <div class="dialog-head"><div><p class="eyebrow">Confirm transaction</p><h2 id="transaction-dialog-title">Review balance change</h2></div><button class="icon-button" type="button" data-action="close-transaction" aria-label="Cancel transaction">×</button></div>
+        <div class="transaction-summary" id="transaction-summary"></div>
+        <p class="form-error" id="transaction-error" role="alert"></p>
+        <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="close-transaction">Cancel</button><button class="button button-primary" id="confirm-transaction-button" type="submit">Confirm</button></div>
+      </form>
+    </dialog>
+    <div class="toast-anchor"><div class="toast t-toast" id="toast" role="status" aria-live="polite"></div></div>
+    <input type="file" id="backup-input" accept="application/json" hidden />
+    <script src="./vendor/gsap.min.js"></script>
+    <script src="./vendor/ScrollTrigger.min.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

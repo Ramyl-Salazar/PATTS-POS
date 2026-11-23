@@ -1,0 +1,18 @@
+{
+  "name": "PATTS Offline POS",
+  "short_name": "PATTS POS",
+  "description": "Offline student ID wallet prototype for teller-operated payments.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f1e8",
+  "theme_color": "#123b2f",
+  "orientation": "any",
+  "icons": [{
+    "src": "./icon.svg",
+    "sizes": "any",
+    "type": "image/svg+xml",
+    "purpose": "any maskable"
+  }]
+}
+
