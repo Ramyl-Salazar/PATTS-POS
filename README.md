@@ -14,7 +14,7 @@ The main screen combines a student wallet, item menu, order summary, and payment
 | --- | --- |
 | ![Item management](docs/screenshots/inventory-desktop.png) | ![Transaction activity](docs/screenshots/activity-desktop.png) |
 
-See the [mobile checkout](docs/screenshots/wallet-mobile.png), [mobile students](docs/screenshots/students-mobile.png), [teller setup](docs/screenshots/teller-setup.png), [payment confirmation](docs/screenshots/transaction-confirmation.png), and [settings](docs/screenshots/settings-desktop.png). Watch the [desktop tour](docs/videos/desktop-tour.mp4) or [mobile tour](docs/videos/mobile-tour.mp4). Captures use synthetic demo data.
+See the [mobile checkout](docs/screenshots/wallet-mobile.png), [mobile students](docs/screenshots/students-mobile.png), [teller setup](docs/screenshots/teller-setup.png), [payment confirmation](docs/screenshots/transaction-confirmation.png), and [settings](docs/screenshots/settings-desktop.png). Watch the [43-second client demo](docs/videos/client-demo.mp4), [desktop tour](docs/videos/desktop-tour.mp4), or [mobile tour](docs/videos/mobile-tour.mp4). The client demo is captioned and silent; all captures use synthetic demo data.
 
 ## How it works
 
