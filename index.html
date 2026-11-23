@@ -3,8 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#123b2f" />
-    <meta name="description" content="Offline PATTS student wallet and teller POS prototype." />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' capacitor:; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'" />
+    <meta name="theme-color" content="#172554" />
+    <meta name="description" content="Offline PATTS student wallet and teller POS functional prototype." />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./icon.svg" type="image/svg+xml" />
     <link rel="preload" href="./vendor/geist-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
@@ -15,37 +16,45 @@
     <a class="skip-link" href="#main">Skip to main content</a>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="#wallet" aria-label="PATTS POS wallet">
+        <button class="menu-button" type="button" data-action="open-navigation" aria-label="Open navigation menu" aria-controls="primary-navigation" aria-expanded="false">
+          <span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span>
+        </button>
+        <a class="brand" href="#wallet" aria-label="PATTS POS main transaction">
           <span class="brand-mark" aria-hidden="true">P</span>
-          <span><strong>PATTS POS</strong><small>Offline wallet console</small></span>
+          <span><strong>PATTS POS</strong></span>
         </a>
         <div class="topbar-actions">
+          <button class="header-reader-status" id="header-reader-status" type="button" data-action="connect-reader" aria-label="Enable NFC reader">
+            <span class="header-reader-dot" aria-hidden="true"></span><span><strong>Reader</strong><small>Checking…</small></span>
+          </button>
           <button class="operator-pill" id="operator-status" data-action="lock" title="Lock teller station" hidden></button>
           <span class="status-pill" id="connection-status" role="status"><span class="status-dot" aria-hidden="true"></span><span>Offline ready</span></span>
           <button class="button button-quiet install-button" id="install-button" hidden>Install app</button>
         </div>
       </header>
       <main id="main" tabindex="-1">
-        <section class="prototype-banner" aria-label="Prototype notice"><span class="banner-light" aria-hidden="true"></span><strong>Prototype environment</strong><span>Demo balances only. No real money or physical card is processed.</span></section>
+        <section class="prototype-banner" aria-label="Prototype notice"><span class="banner-light" aria-hidden="true"></span><strong>Functional prototype</strong><span>Use test cards and balances only.</span></section>
         <div id="app" aria-live="polite"></div>
       </main>
-      <nav class="bottom-nav" aria-label="Primary navigation">
-        <a href="#wallet" data-route="wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v11H4zM7 5h10v2.5H7zM15.5 12h3v2h-3z"/></svg><span>Wallet</span></a>
+      <div class="navigation-scrim" data-action="close-navigation" hidden></div>
+      <nav class="navigation-drawer" id="primary-navigation" aria-label="Primary navigation" aria-hidden="true" inert>
+        <div class="navigation-drawer-head"><div><span class="brand-mark" aria-hidden="true">P</span><span><strong>PATTS POS</strong><small>Navigation</small></span></div><button class="icon-button" type="button" data-action="close-navigation" aria-label="Close navigation menu">×</button></div>
+        <a href="#wallet" data-route="wallet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5h16v11H4zM7 5h10v2.5H7zM15.5 12h3v2h-3z"/></svg><span>Main</span></a>
         <a href="#students" data-route="students"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm8-1a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM2.5 19.5c0-3.7 2.2-6.5 5.5-6.5s5.5 2.8 5.5 6.5h-11Zm11.3 0c0-2-.6-3.8-1.7-5.1a5.1 5.1 0 0 1 3.9-1.7c3.2 0 5.5 2.7 5.5 6.8h-7.7Z"/></svg><span>Students</span></a>
+        <a href="#inventory" data-route="inventory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v5H4V4Zm0 7h7v9H4v-9Zm9 0h7v4h-7v-4Zm0 6h7v3h-7v-3Z"/></svg><span>Items</span></a>
         <a href="#activity" data-route="activity"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18h3V9H4v9Zm6.5 0h3V4h-3v14Zm6.5 0h3v-6h-3v6Z"/></svg><span>Activity</span></a>
         <a href="#settings" data-route="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm9 4.8v-2.6l-2.3-.8-.5-1.2 1-2.2-1.8-1.8-2.2 1-1.2-.5-.8-2.3h-2.6l-.8 2.3-1.2.5-2.2-1-1.8 1.8 1 2.2-.5 1.2-2.3.8v2.6l2.3.8.5 1.2-1 2.2 1.8 1.8 2.2-1 1.2.5.8 2.3h2.6l.8-2.3 1.2-.5 2.2 1 1.8-1.8-1-2.2.5-1.2 2.3-.8Z"/></svg><span>Settings</span></a>
       </nav>
     </div>
     <dialog id="student-dialog" class="dialog">
       <form method="dialog" id="student-form">
-        <div class="dialog-head"><div><p class="eyebrow">New wallet</p><h2>Create student</h2></div><button class="icon-button" type="button" data-action="close-dialog" aria-label="Close dialog">×</button></div>
+        <div class="dialog-head"><div><p class="eyebrow" id="student-dialog-eyebrow">New wallet</p><h2 id="student-dialog-title">Create student</h2></div><button class="icon-button" type="button" data-action="close-dialog" aria-label="Close dialog">×</button></div>
         <label>Student ID<input name="id" required maxlength="30" autocomplete="off" placeholder="2026-0021" /></label>
         <label>Full name<input name="name" required maxlength="80" autocomplete="name" placeholder="Student name" /></label>
-        <label>Program / section<input name="program" maxlength="80" placeholder="BS Aeronautical Engineering" /></label>
-        <label>Opening balance<input name="balance" inputmode="decimal" value="0.00" aria-describedby="opening-help" /></label>
+        <label><span id="student-balance-label">Opening balance</span><input name="balance" inputmode="decimal" value="0.00" aria-describedby="opening-help" /></label>
         <p class="field-help" id="opening-help">Use Philippine pesos, for example 500.00.</p>
-        <p class="form-error" id="student-form-error" role="alert"></p>
-        <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="close-dialog">Cancel</button><button class="button button-primary" type="submit">Create wallet</button></div>
+        <p class="form-error" id="student-form-error" role="alert" tabindex="-1"></p>
+        <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="close-dialog">Cancel</button><button class="button button-primary" id="student-submit-button" type="submit">Create wallet</button></div>
       </form>
     </dialog>
     <dialog id="transaction-dialog" class="dialog transaction-dialog">
@@ -54,6 +63,29 @@
         <div class="transaction-summary" id="transaction-summary"></div>
         <p class="form-error" id="transaction-error" role="alert"></p>
         <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="close-transaction">Cancel</button><button class="button button-primary" id="confirm-transaction-button" type="submit">Confirm</button></div>
+      </form>
+    </dialog>
+    <dialog id="card-dialog" class="dialog card-dialog">
+      <form method="dialog" id="card-form">
+        <div class="dialog-head"><div><p class="eyebrow">Card connection</p><h2>Check this card</h2></div><button class="icon-button" type="button" data-action="close-card-dialog" aria-label="Cancel card registration">×</button></div>
+        <p class="dialog-copy">The card stays read-only. PATTS POS saves its identifier to the selected wallet on this device.</p>
+        <div class="card-summary" id="card-summary"></div>
+        <div class="card-support"><button class="text-button" type="button" data-action="share-nfc-report">Share NFC support report</button>
+        <p class="dialog-copy">Includes card identifiers and reader events. No student names, balances, or PINs.</p></div>
+        <p class="form-error" id="card-form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="close-card-dialog">Cancel</button><button class="button button-primary" id="register-card-button" type="submit" hidden>Connect card</button></div>
+      </form>
+    </dialog>
+    <dialog id="item-dialog" class="dialog">
+      <form method="dialog" id="item-form">
+        <div class="dialog-head"><div><p class="eyebrow">Price list</p><h2 id="item-dialog-title">Add item</h2></div><button class="icon-button" type="button" data-action="close-item-dialog" aria-label="Close dialog">×</button></div>
+        <input type="hidden" name="id" />
+        <label>Item name<input name="name" required maxlength="80" autocomplete="off" placeholder="Student meal" /></label>
+        <label>Category<select name="category" required><option value="food">Food</option><option value="drinks">Drinks</option><option value="service">Service</option></select></label>
+        <label>Price<input name="price" required inputmode="decimal" placeholder="85.00" /></label>
+        <label>Details<input name="details" maxlength="120" placeholder="Optional short description" /></label>
+        <p class="form-error" id="item-form-error" role="alert"></p>
+        <div class="dialog-actions"><button class="button button-quiet" type="button" data-action="close-item-dialog">Cancel</button><button class="button button-primary" type="submit">Save item</button></div>
       </form>
     </dialog>
     <div class="toast-anchor"><div class="toast t-toast" id="toast" role="status" aria-live="polite"></div></div>

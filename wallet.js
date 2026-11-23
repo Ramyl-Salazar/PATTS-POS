@@ -26,4 +26,3 @@ export function createTransaction({ student, type, amount, note = "", teller = "
   const newBalance = calculateBalance(previousBalance, type, amount);
   return { id: crypto.randomUUID(), studentId: student.id, studentName: student.name, type, amount, previousBalance, newBalance, note: note.trim(), teller, createdAt: now.toISOString() };
 }
-

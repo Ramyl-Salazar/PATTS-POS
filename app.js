@@ -1,6 +1,16 @@
-import { clearAndRestore, commitTransaction, getAll, getOne, openDatabase, putOne, resetDatabase, seedDatabase, stores } from "./db.js";
-import { calculateBalance, createTransaction, formatPeso, pesosToCentavos, TRANSACTION_TYPES } from "./wallet.js";
+import { clearAndRestore, commitTransaction, deleteOne, deleteStudent, getAll, getOne, linkStudentCard, openDatabase, putOne, resetDatabase, seedDatabase, stores } from "./db.js";
+import { formatPeso, pesosToCentavos, TRANSACTION_TYPES } from "./wallet.js";
 import { filterStudents } from "./students.js";
+import { findStudentByCard, normalizeCardKey, resolveCardScan } from "./cards.js";
+import { createAuthRecord, PIN_ATTEMPT_LIMIT, recordFailedPin, remainingLockoutMs, verifyPin } from "./access.js";
+import { createBackup, parseBackup } from "./backup.js";
+import { prepareTransaction, updateEnteredCentavos } from "./checkout.js";
+import { buildInventoryItem } from "./inventory.js";
+import { addItemToOrder, addManualAmountToOrder, adjustOrderLine, orderItemCount, orderNote, orderTotal } from "./order.js";
+import { buildReaderReport, cardResult, parseReaderReport, USB_READER_FILTER } from "./reader-protocol.js";
+import { escapeHtml, getRoute, renderAppView, renderStudentCards, renderStudentOptions } from "./views.js";
+
+import { appendReaderDiagnostic, readerDiagnostic } from "./reader-diagnostics.js";
 
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
@@ -9,14 +19,24 @@ const studentForm = document.querySelector("#student-form");
 const transactionDialog = document.querySelector("#transaction-dialog");
 const transactionForm = document.querySelector("#transaction-form");
 const transactionSummary = document.querySelector("#transaction-summary");
+const cardDialog = document.querySelector("#card-dialog");
+const cardForm = document.querySelector("#card-form");
+const cardSummary = document.querySelector("#card-summary");
+const itemDialog = document.querySelector("#item-dialog");
+const itemForm = document.querySelector("#item-form");
 const backupInput = document.querySelector("#backup-input");
 const installButton = document.querySelector("#install-button");
 const connectionStatus = document.querySelector("#connection-status");
 const operatorStatus = document.querySelector("#operator-status");
+const headerReaderStatus = document.querySelector("#header-reader-status");
+const navigationDrawer = document.querySelector("#primary-navigation");
+const navigationScrim = document.querySelector(".navigation-scrim");
+const menuButton = document.querySelector(".menu-button");
 
 let db;
 let students = [];
 let transactions = [];
+let items = [];
 let activeStudentId = null;
 let enteredCentavos = "";
 let deferredInstallPrompt = null;
@@ -24,43 +44,83 @@ let toastTimer;
 let authenticated = false;
 let operatorName = "";
 let authRecord = null;
-let failedPinAttempts = 0;
+let authThrottle = null;
 let pendingTransaction = null;
+let pendingOrderCharge = false;
 let studentQuery = "";
+let readerStatus = "Checking reader…";
+let readerBusy = false;
+let readerReady = false;
+let useSimulatedReader = true;
+let pendingCard = null;
+let repairingCard = false;
+let readerDiagnosticQueue = Promise.resolve();
+let cardForNewStudent = null;
+let activeOrderItems = [];
+let transactionMode = TRANSACTION_TYPES.PAYMENT;
+let itemQuery = "";
+let itemCategory = "all";
+let activityStudentId = "";
+let checkoutControlsCollapsed = true;
+let editingStudentId = null;
+let manualLineSequence = 0;
+let autoReaderTimer = null;
+let lastCardStudentId = null;
+let studentSelectionRevision = 0;
+let lastMotionRoute = null;
 
 const nativePlugin = (name) => window.Capacitor?.Plugins?.[name];
+const isNativeApp = Boolean(window.Capacitor?.isNativePlatform?.());
+const supportsWebHid = "hid" in navigator;
+useSimulatedReader = !nativePlugin("NfcReader") && !supportsWebHid;
+let preferredWebCardType = "HF";
+const CARD_PROBE_TIMEOUT_MS = { HF: 1400, LF: 4200 };
+
+function exchangeWebHid(device, command, payload, timeoutMs) {
+  return new Promise(async (resolve, reject) => {
+    const timeout = setTimeout(() => { device.removeEventListener("inputreport", onReport); resolve(null); }, timeoutMs);
+    function onReport(event) {
+      const response = parseReaderReport(event.data, command);
+      if (!response) return;
+      clearTimeout(timeout); device.removeEventListener("inputreport", onReport); resolve(response);
+    }
+    device.addEventListener("inputreport", onReport);
+    try { await device.sendReport(0, buildReaderReport(command, payload)); }
+    catch (error) { clearTimeout(timeout); device.removeEventListener("inputreport", onReport); reject(error); }
+  });
+}
+
+async function scanWebHid() {
+  let [device] = (await navigator.hid.getDevices()).filter((item) => item.vendorId === USB_READER_FILTER.vendorId && item.productId === USB_READER_FILTER.productId);
+  if (!device) [device] = await navigator.hid.requestDevice({ filters: [USB_READER_FILTER] });
+  if (!device) throw new Error("No NFC-X reader was selected.");
+  if (!device.opened) await device.open();
+  const probes = preferredWebCardType === "LF"
+    ? [["LF", 0x0072, [0, 0]], ["HF", 0x0069, []]]
+    : [["HF", 0x0069, []], ["LF", 0x0072, [0, 0]]];
+  let cardType = preferredWebCardType;
+  let payload = null;
+  for (const [type, command, commandPayload] of probes) {
+    cardType = type;
+    payload = await exchangeWebHid(device, command, commandPayload, CARD_PROBE_TIMEOUT_MS[type]);
+    if (payload?.length > 1 && payload[0] !== 0) break;
+    payload = null;
+  }
+  if (!payload) throw new Error("No card detected. Hold the card on the reader and try again.");
+  preferredWebCardType = cardType;
+  return cardResult(cardType, payload, device.productName || "NFC-X reader");
+}
 
 async function confirmWithHaptics(type = "SUCCESS") {
   try { await nativePlugin("Haptics")?.notification({ type }); } catch { /* Haptics are optional. */ }
 }
 
-const bytesToHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-
-function hexToBytes(value) {
-  if (!/^[0-9a-f]+$/i.test(value) || value.length % 2) throw new Error("Stored access data is invalid.");
-  return new Uint8Array(value.match(/.{2}/g).map((pair) => Number.parseInt(pair, 16)));
-}
-
-async function derivePinHash(pin, salt) {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 150000 }, key, 256);
-  return bytesToHex(new Uint8Array(bits));
-}
-
-function hashesMatch(left, right) {
-  if (left.length !== right.length) return false;
-  let difference = 0;
-  for (let index = 0; index < left.length; index += 1) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
-  return difference === 0;
-}
-
-const escapeHtml = (value) => String(value ?? "")
-  .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
-
 function renderAccessGate() {
   document.body.classList.add("access-locked");
+  document.body.classList.remove("checkout-active");
   operatorStatus.hidden = true;
+  headerReaderStatus.hidden = true;
+  setNavigationOpen(false);
   const isSetup = !authRecord;
   app.innerHTML = `
     <section class="access-page">
@@ -76,6 +136,7 @@ function renderAccessGate() {
           <p class="form-error" id="access-error" role="alert"></p>
           <button class="button button-primary" type="submit">${isSetup ? "Create teller access" : "Unlock station"}</button>
         </form>
+        ${!isNativeApp ? `<button class="text-button" type="button" data-action="demo-session">Continue with a temporary demo session</button>` : ""}
         <small class="access-note">Local prototype security · no internet connection required</small>
       </article>
     </section>`;
@@ -93,29 +154,24 @@ async function handleAccessSubmit(event) {
   button.disabled = true;
   error.textContent = "";
   try {
-    if (!/^\d{4,8}$/.test(pin)) throw new Error("Use a PIN containing 4 to 8 digits.");
     if (!authRecord) {
-      const tellerName = String(data.get("tellerName")).trim();
-      if (!tellerName) throw new Error("Enter the teller name.");
-      if (pin !== String(data.get("confirmPin"))) throw new Error("The PIN entries do not match.");
-      const salt = crypto.getRandomValues(new Uint8Array(16));
-      authRecord = { key: "auth", value: { tellerName, salt: bytesToHex(salt), hash: await derivePinHash(pin, salt), createdAt: new Date().toISOString() } };
+      authRecord = await createAuthRecord({ tellerName: data.get("tellerName"), pin, confirmPin: String(data.get("confirmPin")) });
       await putOne(db, stores.SETTINGS, authRecord);
     } else {
-      const attemptedHash = await derivePinHash(pin, hexToBytes(authRecord.value.salt));
-      if (!hashesMatch(attemptedHash, authRecord.value.hash)) {
-        failedPinAttempts += 1;
-        const remaining = 5 - failedPinAttempts;
+      const lockoutMs = remainingLockoutMs(authThrottle);
+      if (lockoutMs) throw new Error(`Too many attempts. Try again in ${Math.ceil(lockoutMs / 1000)} seconds.`);
+      if (!await verifyPin(pin, authRecord)) {
+        authThrottle = recordFailedPin(authThrottle);
+        await putOne(db, stores.SETTINGS, authThrottle);
+        const remaining = PIN_ATTEMPT_LIMIT - authThrottle.value.failures;
         await confirmWithHaptics("ERROR");
-        if (remaining <= 0) {
-          button.disabled = true;
-          throw new Error("Too many attempts. Close and reopen the app to try again.");
-        }
+        if (authThrottle.value.lockedUntil) throw new Error("Too many attempts. Try again in 30 seconds.");
         throw new Error(`Incorrect PIN. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`);
       }
     }
     authenticated = true;
-    failedPinAttempts = 0;
+    authThrottle = null;
+    await deleteOne(db, stores.SETTINGS, "authThrottle");
     operatorName = authRecord.value.tellerName;
     document.body.classList.remove("access-locked");
     operatorStatus.textContent = `${operatorName} · Lock`;
@@ -124,15 +180,20 @@ async function handleAccessSubmit(event) {
     render();
     window.scrollTo({ top: 0, behavior: "auto" });
     showToast(`Station unlocked for ${operatorName}.`);
+    scheduleAutoReader(0);
   } catch (cause) {
     error.textContent = cause.message;
-    if (failedPinAttempts < 5) button.disabled = false;
+    const lockoutMs = remainingLockoutMs(authThrottle);
+    if (lockoutMs) {
+      setTimeout(() => { button.disabled = false; error.textContent = ""; }, lockoutMs + 50);
+    } else {
+      button.disabled = false;
+    }
   }
 }
 
 function route() {
-  const requested = location.hash.slice(1);
-  return ["wallet", "students", "activity", "settings"].includes(requested) ? requested : "wallet";
+  return getRoute(location.hash);
 }
 
 function showToast(message, tone = "success") {
@@ -146,7 +207,9 @@ function showToast(message, tone = "success") {
 async function refreshData() {
   students = (await getAll(db, stores.STUDENTS)).sort((a, b) => a.name.localeCompare(b.name));
   transactions = (await getAll(db, stores.TRANSACTIONS)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  if (!students.some((student) => student.id === activeStudentId)) activeStudentId = students[0]?.id ?? null;
+  items = (await getAll(db, stores.ITEMS)).sort((a, b) => a.name.localeCompare(b.name));
+  if (!students.some((student) => student.id === activeStudentId)) activeStudentId = null;
+  if (!students.some((student) => student.id === activityStudentId)) activityStudentId = "";
 }
 
 function updateNavigation() {
@@ -158,28 +221,44 @@ function updateNavigation() {
   });
 }
 
-function avatar(name) {
-  return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+function setNavigationOpen(open) {
+  navigationDrawer.classList.toggle("is-open", open);
+  navigationDrawer.setAttribute("aria-hidden", String(!open));
+  navigationDrawer.inert = !open;
+  navigationScrim.hidden = !open;
+  menuButton.setAttribute("aria-expanded", String(open));
+  document.body.classList.toggle("navigation-open", open);
+  if (open) navigationDrawer.querySelector("[data-action='close-navigation']")?.focus();
 }
 
-function transactionLabel(type) {
-  return type === TRANSACTION_TYPES.PAYMENT ? "Payment" : "Funds added";
+function updateHeaderReader() {
+  headerReaderStatus.hidden = !authenticated;
+  if (!authenticated) return;
+  const title = headerReaderStatus.querySelector("strong");
+  const detail = headerReaderStatus.querySelector("small");
+  headerReaderStatus.classList.toggle("is-ready", readerReady);
+  headerReaderStatus.classList.toggle("is-simulated", useSimulatedReader);
+  headerReaderStatus.disabled = readerBusy;
+  if (useSimulatedReader) {
+    headerReaderStatus.dataset.action = "simulate-tap";
+    headerReaderStatus.setAttribute("aria-label", "Simulate student card tap");
+    title.textContent = "Demo reader";
+    detail.textContent = "Tap to simulate";
+  } else if (readerReady) {
+    headerReaderStatus.dataset.action = "connect-reader";
+    headerReaderStatus.setAttribute("aria-label", "Scan a student card");
+    title.textContent = "Reader ready";
+    detail.textContent = "Tap student card";
+  } else {
+    headerReaderStatus.dataset.action = "connect-reader";
+    headerReaderStatus.setAttribute("aria-label", readerBusy ? "Connecting NFC reader" : "Enable NFC reader");
+    title.textContent = readerBusy ? "Connecting…" : "Reader offline";
+    detail.textContent = readerBusy ? "Please wait" : "Tap to enable";
+  }
 }
 
 function matchingStudents() {
   return filterStudents(students, studentQuery);
-}
-
-function renderStudentOptions() {
-  const matches = matchingStudents();
-  if (!matches.length) return `<div class="search-empty"><strong>No wallet found</strong><span>Try a name, student ID, or program.</span><button class="text-button" data-action="clear-search">Clear search</button></div>`;
-  return matches.map((item) => `<button class="student-option ${item.id === activeStudentId ? "selected" : ""}" data-student-id="${escapeHtml(item.id)}"><span class="avatar">${avatar(item.name)}</span><span class="student-option-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.id)}</small></span><span class="student-option-balance">${formatPeso(item.balance)}</span></button>`).join("");
-}
-
-function renderStudentCards() {
-  const matches = matchingStudents();
-  if (!matches.length) return `<div class="search-empty wide"><strong>No students match “${escapeHtml(studentQuery)}”</strong><span>Search by full or partial name, student ID, or program.</span><button class="text-button" data-action="clear-search">Clear search</button></div>`;
-  return matches.map((student) => `<button class="student-card" data-open-student="${escapeHtml(student.id)}"><span class="avatar large">${avatar(student.name)}</span><span class="student-card-copy"><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.id)}</small><small>${escapeHtml(student.program)}</small></span><span class="student-card-balance"><small>Balance</small><b>${formatPeso(student.balance)}</b></span></button>`).join("");
 }
 
 function initializeMotion() {
@@ -196,95 +275,45 @@ function initializeMotion() {
   }
 }
 
-function renderTransactionRows(items, emptyText = "No transactions recorded yet.") {
-  if (!items.length) return `<div class="empty-state"><strong>Nothing here yet</strong><p>${emptyText}</p></div>`;
-  return `<div class="transaction-list">${items.map((item) => `
-    <article class="transaction-row">
-      <span class="transaction-icon ${item.type}" aria-hidden="true">${item.type === TRANSACTION_TYPES.PAYMENT ? "−" : "+"}</span>
-      <div><strong>${escapeHtml(transactionLabel(item.type))}</strong><span>${escapeHtml(item.studentName)} · ${new Date(item.createdAt).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" })} · ${escapeHtml(item.teller || "Unknown teller")}</span></div>
-      <div class="transaction-amount ${item.type}">${item.type === TRANSACTION_TYPES.PAYMENT ? "−" : "+"}${formatPeso(item.amount)}<small>Bal. ${formatPeso(item.newBalance)}</small></div>
-    </article>`).join("")}</div>`;
-}
-
-function renderWallet() {
-  const student = students.find((item) => item.id === activeStudentId);
-  if (!student) return `<section class="page"><div class="page-head"><div><p class="eyebrow">Teller station</p><h1>Student wallet</h1></div></div><div class="empty-state"><strong>No student wallets</strong><p>Create a student wallet to begin.</p><button class="button button-primary" data-action="new-student">Create student</button></div></section>`;
-  const amountPreview = enteredCentavos ? formatPeso(Number(enteredCentavos)) : "₱0.00";
-  const recent = transactions.filter((item) => item.studentId === student.id).slice(0, 4);
-  return `
-    <section class="page wallet-page">
-      <div class="page-intro"><div><p class="eyebrow">Offline wallet console</p><h1>Move through the line, faster.</h1><p>Select a student, enter an amount, and confirm. Every action stays on this device.</p></div><button class="button button-scan" data-action="simulate-tap"><span class="scan-wave" aria-hidden="true"></span> Simulate ID tap</button></div>
-      <div class="wallet-bento">
-        <aside class="student-picker" aria-label="Student wallets">
-          <div class="panel-heading"><div><span>Student directory</span><strong>${students.length} wallets</strong></div><button class="mini-action" data-action="new-student" aria-label="Create student wallet">New</button></div>
-          <label class="search-field"><span class="search-glyph" aria-hidden="true"></span><input type="search" data-student-search placeholder="Search name, ID, or program" value="${escapeHtml(studentQuery)}" autocomplete="off" /></label>
-          <div id="student-picker-list" class="student-picker-list" aria-live="polite">${renderStudentOptions()}</div>
-        </aside>
-        <article class="wallet-card">
-          <div class="wallet-orbit" aria-hidden="true"></div>
-          <div class="wallet-card-top"><span class="wallet-chip" aria-hidden="true"></span><span>PATTS STUDENT WALLET</span></div>
-          <div class="balance-block"><p>Available balance</p><strong class="balance">${formatPeso(student.balance)}</strong></div>
-          <div class="wallet-owner"><span class="avatar light">${avatar(student.name)}</span><span><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.id)}</small></span><span class="program-name">${escapeHtml(student.program)}</span></div>
-        </article>
-        <section class="amount-panel">
-          <div class="panel-heading"><div><span>Transaction</span><strong>Enter amount</strong></div><span class="secure-copy">Local only</span></div>
-          <div class="amount-display"><span>PHP</span><strong>${amountPreview.replace("₱", "")}</strong></div>
-          <div class="quick-amounts" aria-label="Quick amounts">${[5000,10000,20000].map((amount) => `<button data-quick-amount="${amount}">${formatPeso(amount)}</button>`).join("")}</div>
-          <div class="keypad" aria-label="Amount keypad">${[1,2,3,4,5,6,7,8,9,"00",0,"←"].map((key) => `<button data-key="${key}" aria-label="${key === "←" ? "Delete digit" : `Enter ${key}`}">${key}</button>`).join("")}</div>
-          <div class="transaction-actions"><button class="button button-payment" data-action="payment" ${enteredCentavos ? "" : "disabled"}>Deduct</button><button class="button button-topup" data-action="topup" ${enteredCentavos ? "" : "disabled"}>Add funds</button></div>
-        </section>
-        <section class="recent-section"><div class="section-head"><div><span>Selected wallet</span><h2>Recent movement</h2></div><a href="#activity">Full ledger</a></div>${renderTransactionRows(recent, "This wallet has no transactions yet.")}</section>
-      </div>
-    </section>`;
-}
-
-function renderStudents() {
-  const matches = matchingStudents();
-  return `<section class="page"><div class="page-intro compact"><div><p class="eyebrow">Wallet directory</p><h1>Every student, one tap away.</h1><p>${students.length} wallets stored locally on this device.</p></div><button class="button button-primary" data-action="new-student">Create wallet</button></div><div class="directory-toolbar"><label class="search-field large"><span class="search-glyph" aria-hidden="true"></span><input type="search" data-student-search placeholder="Search name, ID, or program" value="${escapeHtml(studentQuery)}" autocomplete="off" /></label><span id="search-count">${matches.length} result${matches.length === 1 ? "" : "s"}</span></div><div class="student-grid" id="student-grid" aria-live="polite">${renderStudentCards()}</div></section>`;
-}
-
-function renderActivity() {
-  const payments = transactions.filter((item) => item.type === TRANSACTION_TYPES.PAYMENT).reduce((sum, item) => sum + item.amount, 0);
-  const topups = transactions.filter((item) => item.type === TRANSACTION_TYPES.TOP_UP).reduce((sum, item) => sum + item.amount, 0);
-  return `<section class="page"><div class="page-intro compact"><div><p class="eyebrow">Local ledger</p><h1>A clear record of every movement.</h1><p>Newest transactions appear first and remain available offline.</p></div></div><div class="metric-row"><article class="metric-feature"><span>Total activity</span><strong>${transactions.length}</strong><small>Recorded transactions</small></article><article><span>Payments</span><strong>${formatPeso(payments)}</strong></article><article><span>Funds added</span><strong>${formatPeso(topups)}</strong></article></div><section class="surface ledger-surface"><div class="section-head"><div><span>Audit trail</span><h2>Transaction history</h2></div><span class="local-label">On-device storage</span></div>${renderTransactionRows(transactions)}</section></section>`;
-}
-
-function renderSettings() {
-  return `<section class="page"><div class="page-intro compact"><div><p class="eyebrow">Device controls</p><h1>Keep the station ready.</h1><p>Protect, move, or reset data stored on this device.</p></div></div><div class="settings-layout">
-    <section class="surface settings-section"><h2>Data backup</h2><p>Export a JSON backup before clearing Chrome data or changing devices.</p><div class="button-row"><button class="button button-primary" data-action="export">Export backup</button><button class="button button-quiet" data-action="import">Restore backup</button></div></section>
-    <section class="surface settings-section"><h2>Prototype status</h2><dl><div><dt>Storage</dt><dd>IndexedDB, local device only</dd></div><div><dt>Network</dt><dd>Not required after installation</dd></div><div><dt>Card reader</dt><dd>Simulated until hardware arrives</dd></div><div><dt>Teller</dt><dd>${escapeHtml(operatorName)} · PIN protected</dd></div></dl><button class="button button-quiet" data-action="lock">Lock teller station</button></section>
-    <section class="surface settings-section danger-zone"><h2>Reset prototype</h2><p>Deletes local transactions and restores the 20 demo wallets.</p><button class="button button-danger" data-action="reset">Reset demo data</button></section>
-  </div></section>`;
-}
-
 function render() {
   if (!authenticated) return renderAccessGate();
   updateNavigation();
+  updateHeaderReader();
   const current = route();
-  app.innerHTML = current === "wallet" ? renderWallet() : current === "students" ? renderStudents() : current === "activity" ? renderActivity() : renderSettings();
+  document.body.classList.toggle("checkout-active", current === "wallet");
+  app.innerHTML = renderAppView(current, {
+    students, transactions, items, activeStudentId, enteredCentavos, activeOrderItems, transactionMode, itemQuery, itemCategory,
+    activityStudentId, checkoutControlsCollapsed,
+    studentQuery, readerStatus, readerBusy, readerReady, useSimulatedReader, operatorName,
+  });
   document.title = `${current[0].toUpperCase()}${current.slice(1)} · PATTS POS`;
-  requestAnimationFrame(initializeMotion);
+  if (lastMotionRoute !== current) {
+    lastMotionRoute = current;
+    requestAnimationFrame(initializeMotion);
+  }
 }
 
 async function processTransaction(type) {
   const student = students.find((item) => item.id === activeStudentId);
-  if (!student) return;
   try {
-    if (!enteredCentavos) throw new Error("Enter an amount first.");
-    const amount = Number(enteredCentavos);
-    const nextBalance = calculateBalance(student.balance, type, amount);
-    pendingTransaction = createTransaction({ student, type, amount, teller: operatorName });
+    const isOrderCharge = type === TRANSACTION_TYPES.PAYMENT;
+    const transactionAmount = isOrderCharge ? String(orderTotal(activeOrderItems)) : enteredCentavos;
+    const note = isOrderCharge ? orderNote(activeOrderItems) : "";
+    const { amount, newBalance, transaction } = prepareTransaction({ student, type, enteredCentavos: transactionAmount, note, teller: operatorName });
+    pendingTransaction = transaction;
+    pendingOrderCharge = isOrderCharge;
     const label = type === TRANSACTION_TYPES.PAYMENT ? "Deduct payment" : "Add funds";
     document.querySelector("#transaction-dialog-title").textContent = label;
     document.querySelector("#confirm-transaction-button").textContent = `Confirm ${type === TRANSACTION_TYPES.PAYMENT ? "deduction" : "addition"}`;
-    transactionSummary.innerHTML = `<dl><div><dt>Student</dt><dd>${escapeHtml(student.name)}</dd></div><div><dt>Student ID</dt><dd>${escapeHtml(student.id)}</dd></div><div><dt>${type === TRANSACTION_TYPES.PAYMENT ? "Amount to deduct" : "Amount to add"}</dt><dd>${formatPeso(amount)}</dd></div><div class="summary-total"><dt>New balance</dt><dd>${formatPeso(nextBalance)}</dd></div></dl>`;
+    transactionSummary.innerHTML = `${type === TRANSACTION_TYPES.TOP_UP ? `<div class="topup-confirm-warning"><strong>Add funds confirmation</strong><span>This will increase the student's wallet balance. No payment will be deducted.</span></div>` : ""}<dl><div><dt>Student</dt><dd>${escapeHtml(student.name)}</dd></div><div><dt>Student ID</dt><dd>${escapeHtml(student.id)}</dd></div>${isOrderCharge ? `<div><dt>Order</dt><dd>${orderItemCount(activeOrderItems)} item${orderItemCount(activeOrderItems) === 1 ? "" : "s"}</dd></div>` : ""}<div><dt>${type === TRANSACTION_TYPES.PAYMENT ? "Amount to deduct" : "Amount to add"}</dt><dd>${formatPeso(amount)}</dd></div><div class="summary-total"><dt>New balance</dt><dd>${formatPeso(newBalance)}</dd></div></dl>`;
     document.querySelector("#transaction-error").textContent = "";
     transactionDialog.showModal();
   } catch (error) {
     await confirmWithHaptics("ERROR");
     showToast(error.message, "error");
-    document.querySelector(".amount-panel")?.classList.add("attention");
-    setTimeout(() => document.querySelector(".amount-panel")?.classList.remove("attention"), 900);
+    const attentionPanel = document.querySelector(type === TRANSACTION_TYPES.PAYMENT ? ".order-panel" : ".keypad-panel");
+    attentionPanel?.classList.add("attention");
+    setTimeout(() => attentionPanel?.classList.remove("attention"), 900);
   }
 }
 
@@ -300,6 +329,10 @@ async function commitPendingTransaction(event) {
     const transaction = pendingTransaction;
     await commitTransaction(db, student, transaction);
     pendingTransaction = null; enteredCentavos = "";
+    if (pendingOrderCharge) activeOrderItems = [];
+    transactionMode = TRANSACTION_TYPES.PAYMENT;
+    checkoutControlsCollapsed = true;
+    pendingOrderCharge = false;
     transactionDialog.close();
     await refreshData(); render();
     await confirmWithHaptics();
@@ -312,9 +345,7 @@ async function commitPendingTransaction(event) {
 }
 
 function handleKey(key) {
-  if (key === "←") enteredCentavos = enteredCentavos.slice(0, -1);
-  else if (enteredCentavos.length < 8) enteredCentavos += String(key);
-  enteredCentavos = enteredCentavos.replace(/^0+(?=\d)/, "");
+  enteredCentavos = updateEnteredCentavos(enteredCentavos, key);
   render();
 }
 
@@ -322,78 +353,420 @@ function simulateTap() {
   if (!students.length) return;
   const index = Math.max(0, students.findIndex((item) => item.id === activeStudentId));
   activeStudentId = students[(index + 1) % students.length].id;
-  enteredCentavos = ""; render();
+  enteredCentavos = ""; activeOrderItems = []; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true; render();
   showToast(`ID recognized: ${students.find((item) => item.id === activeStudentId).name}`);
+}
+
+async function updateReaderStatus() {
+  const reader = nativePlugin("NfcReader");
+  if (!reader && supportsWebHid) {
+    useSimulatedReader = false;
+    try {
+      const granted = (await navigator.hid.getDevices()).some((item) => item.vendorId === USB_READER_FILTER.vendorId && item.productId === USB_READER_FILTER.productId);
+      readerReady = granted;
+      readerStatus = granted ? "NFC-X USB reader authorized · automatic detection active" : "USB reader connected after one-time authorization";
+    } catch {
+      readerReady = false;
+      readerStatus = "USB reader authorization unavailable";
+    }
+    return;
+  }
+  if (!reader) { useSimulatedReader = true; readerReady = false; readerStatus = "Simulation mode (unsupported browser)"; return; }
+  try {
+    const status = await reader.status();
+    useSimulatedReader = Boolean(status.emulator && !status.bridge);
+    readerReady = !useSimulatedReader && Boolean(status.connected && status.permissionGranted);
+    if (useSimulatedReader) { readerStatus = "Simulation mode (start the PC NFC-X bridge for real cards)"; return; }
+    readerStatus = status.connected
+      ? `${status.reader || "NFC-X reader"} connected${status.permissionGranted ? " · automatic detection active" : " · authorization needed"}`
+      : "Connect NFC-X reader via USB OTG";
+  } catch { readerReady = false; readerStatus = "Reader status unavailable"; }
+}
+
+function recordReaderDiagnostic(event, card, student = null) {
+  const entry = readerDiagnostic(event, card, student);
+  readerDiagnosticQueue = readerDiagnosticQueue.then(async () => {
+    const saved = await getOne(db, stores.SETTINGS, "nfcDiagnostics");
+    await putOne(db, stores.SETTINGS, { key: "nfcDiagnostics", value: appendReaderDiagnostic(saved?.value, entry) });
+  }).catch(() => { /* Support history must not block card use. */ });
+  return readerDiagnosticQueue;
+}
+
+function openCardEnrollment(result) {
+  pendingCard = { ...result, cardKey: normalizeCardKey(result.cardKey, result.cardType) };
+  repairingCard = false;
+  recordReaderDiagnostic("unmatched_card", pendingCard);
+  document.querySelector("#register-card-button").hidden = true;
+  cardSummary.innerHTML = `<div class="card-detected"><span class="reader-ready-pulse" aria-hidden="true"></span><div><strong>Card not linked on this tablet</strong><small>${escapeHtml(pendingCard.cardKey)}</small></div></div><p class="dialog-copy">Already registered? Repair its link to the existing student. Their balance and history stay the same.</p><div class="card-choice"><button class="button button-primary" type="button" data-action="card-repair">Repair existing card</button><button class="button button-quiet" type="button" data-action="card-existing">Connect a new or replacement card</button><button class="button button-quiet" type="button" data-action="card-new">Create a new student</button></div>`;
+  document.querySelector("#card-form-error").textContent = "";
+  cardDialog.showModal();
+}
+
+function showExistingStudentCardLink(repair = false) {
+  if (!pendingCard) return;
+  repairingCard = repair;
+  const options = students.map((student) => `<option value="${escapeHtml(student.id)}">${escapeHtml(student.name)} &middot; ${escapeHtml(student.id)}</option>`).join("");
+  cardSummary.innerHTML = `<div class="card-detected"><span class="reader-ready-pulse" aria-hidden="true"></span><div><strong>${repair ? "Repair this card's link" : "Connect this card"}</strong><small>${escapeHtml(pendingCard.cardKey)}</small></div></div><label>Student wallet<select name="studentId" required><option value="" selected disabled>Choose the verified student</option>${options}</select></label><p class="dialog-copy">${repair ? "Use this only for the same physical card already owned by this student. The saved identifier is kept, and this reading is remembered too." : "If this student already has a linked card, connecting this one replaces that link and removes previous card repairs."}</p><label class="card-confirm"><input type="checkbox" name="confirmOwner" required /><span>I verified the student's identity and that this card belongs to them.</span></label>`;
+  const button = document.querySelector("#register-card-button");
+  button.textContent = repair ? "Repair card link" : "Connect card";
+  button.hidden = false;
+}
+
+async function enrollCard(event) {
+  event.preventDefault();
+  if (!pendingCard) return;
+  const error = document.querySelector("#card-form-error");
+  const submitButton = document.querySelector("#register-card-button");
+  submitButton.disabled = true;
+  try {
+    const data = new FormData(cardForm);
+    if (!data.get("confirmOwner")) throw new Error("Verify the student and confirm card ownership first.");
+    const studentId = String(data.get("studentId"));
+    const card = { ...pendingCard };
+    const repair = repairingCard;
+    const previous = await getOne(db, stores.STUDENTS, studentId);
+    await recordReaderDiagnostic(repair ? "repair_requested" : "connection_requested", card, previous);
+    const student = await linkStudentCard(db, studentId, card, { preserveExisting: repair });
+    await recordReaderDiagnostic(repair ? "repair_saved" : "connection_saved", card, student);
+    activeStudentId = student.id;
+    enteredCentavos = "";
+    activeOrderItems = [];
+    transactionMode = TRANSACTION_TYPES.PAYMENT;
+    checkoutControlsCollapsed = true;
+    await refreshData();
+    cardDialog.close();
+    await confirmWithHaptics();
+    render();
+    showToast(`Card linked to ${student.name}. Remove it and tap again to check.`);
+  } catch (cause) {
+    error.textContent = cause.message;
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
+async function scanCard(automatic = false) {
+  const reader = nativePlugin("NfcReader");
+  if (useSimulatedReader) return simulateTap();
+  if (readerBusy) return;
+  const selectionRevision = studentSelectionRevision;
+  readerBusy = true;
+  if (!automatic) render();
+  try {
+    const { card: result, student: match } = await resolveCardScan(
+      () => reader ? reader.scan() : scanWebHid(), students,
+      () => getAll(db, stores.STUDENTS),
+    );
+    if (!authenticated) return;
+    if (document.querySelector("dialog[open]") || (automatic && selectionRevision !== studentSelectionRevision)) {
+      lastCardStudentId = match?.id || null;
+      return;
+    }
+    if (match) {
+      if (automatic && match.id === lastCardStudentId) return;
+      lastCardStudentId = match.id;
+      if (match.cardAliases?.includes(result.cardKey)) recordReaderDiagnostic("repaired_card_recognized", result, match);
+      if (students.some((student) => student.id === match.id)) {
+        students = students.map((student) => student.id === match.id ? match : student);
+      } else students.push(match);
+      activeStudentId = match.id; enteredCentavos = "";
+      activeOrderItems = []; transactionMode = TRANSACTION_TYPES.PAYMENT;
+      checkoutControlsCollapsed = true;
+      render();
+      await confirmWithHaptics();
+      showToast(`Card recognized: ${match.name}`);
+      return;
+    }
+    lastCardStudentId = null;
+    openCardEnrollment(result);
+  } catch (error) {
+    const message = error.message || "The card could not be read.";
+    lastCardStudentId = null;
+    if (/READER_NOT_CONNECTED|READER_ERROR/.test(error.code || "")) readerReady = false;
+    if (!automatic) {
+      if (/permission.*denied/i.test(message)) {
+        await updateReaderStatus();
+        if (readerReady) { render(); return; }
+      }
+      await confirmWithHaptics("ERROR");
+      showToast(message, "error");
+    }
+  } finally {
+    readerBusy = false;
+    if (!automatic) { await updateReaderStatus(); render(); }
+  }
+}
+
+function scheduleAutoReader(delay = 300) {
+  clearTimeout(autoReaderTimer);
+  autoReaderTimer = setTimeout(async () => {
+    let nextDelay = 650;
+    try {
+      if (authenticated && !document.hidden && !readerBusy && !document.querySelector("dialog[open]")) {
+        if (readerReady) {
+          nextDelay = 100;
+          await scanCard(true);
+        } else {
+          await updateReaderStatus();
+        }
+      }
+    } finally {
+      scheduleAutoReader(nextDelay);
+    }
+  }, delay);
+}
+
+function openStudentDialog(card = null, student = null) {
+  cardForNewStudent = card;
+  editingStudentId = student?.id || null;
+  studentForm.reset();
+  studentForm.elements.id.readOnly = Boolean(student);
+  studentForm.elements.id.value = student?.id || "";
+  studentForm.elements.name.value = student?.name || "";
+  studentForm.elements.balance.value = student ? (student.balance / 100).toFixed(2) : "0.00";
+  document.querySelector("#student-dialog-eyebrow").textContent = student ? "Student details" : card ? "Card registration" : "New wallet";
+  document.querySelector("#student-dialog-title").textContent = student ? "Edit student" : card ? "Create student and connect card" : "Create student";
+  document.querySelector("#student-balance-label").textContent = student ? "Current balance" : "Opening balance";
+  document.querySelector("#student-submit-button").textContent = student ? "Save changes" : "Create wallet";
+  document.querySelector("#student-form-error").textContent = "";
+  studentDialog.showModal();
 }
 
 async function createStudent(event) {
   event.preventDefault();
   const data = new FormData(studentForm);
   const error = document.querySelector("#student-form-error");
+  const submitButton = studentForm.querySelector("button[type='submit']");
+  const originalLabel = submitButton.textContent;
+  submitButton.disabled = true;
+  submitButton.setAttribute("aria-busy", "true");
+  submitButton.textContent = "Saving…";
+  error.textContent = "";
   try {
     const id = String(data.get("id")).trim();
-    if (await getOne(db, stores.STUDENTS, id)) throw new Error("That student ID already has a wallet.");
+    const existing = editingStudentId ? await getOne(db, stores.STUDENTS, editingStudentId) : null;
+    if (!editingStudentId && await getOne(db, stores.STUDENTS, id)) throw new Error("That student ID already has a wallet.");
+    if (editingStudentId && !existing) throw new Error("This student wallet is no longer available.");
     const rawBalance = String(data.get("balance")).trim();
     const balance = !rawBalance || rawBalance === "0" || rawBalance === "0.00" ? 0 : pesosToCentavos(rawBalance);
-    await putOne(db, stores.STUDENTS, { id, name: String(data.get("name")).trim(), program: String(data.get("program")).trim() || "Program not specified", balance, active: true });
-    activeStudentId = id; await refreshData(); studentDialog.close(); studentForm.reset(); location.hash = "wallet"; render(); showToast("Student wallet created.");
+    const card = cardForNewStudent;
+    if (card) {
+      const linkedStudent = findStudentByCard(await getAll(db, stores.STUDENTS), card.cardKey, card.cardType);
+      if (linkedStudent) throw new Error(`This card is already registered to ${linkedStudent.name}.`);
+    }
+    await putOne(db, stores.STUDENTS, { ...existing, id, name: String(data.get("name")).trim(), balance, active: true, ...(card ? { cardKey: normalizeCardKey(card.cardKey, card.cardType), cardType: card.cardType } : {}) });
+    cardForNewStudent = null;
+    editingStudentId = null;
+    if (card) { activeStudentId = id; activeOrderItems = []; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true; }
+    await refreshData();
+    studentDialog.close();
+    studentForm.reset();
+    if (card) location.hash = "wallet";
+    else render();
+    showToast(existing ? "Student updated." : card ? "Student created and card connected." : "Student wallet created.");
+  } catch (cause) {
+    error.textContent = cause.message;
+    error.focus?.();
+  } finally {
+    submitButton.disabled = false;
+    submitButton.removeAttribute("aria-busy");
+    submitButton.textContent = originalLabel;
+  }
+}
+
+function openItemDialog(item = null) {
+  itemForm.reset();
+  itemForm.elements.id.value = item?.id || "";
+  itemForm.elements.name.value = item?.name || "";
+  itemForm.elements.category.value = item?.category || "service";
+  itemForm.elements.price.value = item ? (item.price / 100).toFixed(2) : "";
+  itemForm.elements.details.value = item?.details || "";
+  document.querySelector("#item-dialog-title").textContent = item ? "Edit item" : "Add item";
+  document.querySelector("#item-form-error").textContent = "";
+  itemDialog.showModal();
+}
+
+async function saveItem(event) {
+  event.preventDefault();
+  const data = new FormData(itemForm);
+  const error = document.querySelector("#item-form-error");
+  try {
+    const existingId = String(data.get("id") || "");
+    const item = buildInventoryItem({ id: existingId, name: data.get("name"), price: data.get("price"), details: data.get("details"), category: data.get("category") });
+    await putOne(db, stores.ITEMS, item);
+    await refreshData();
+    itemDialog.close();
+    render();
+    showToast(existingId ? "Item updated." : "Item added.");
   } catch (cause) { error.textContent = cause.message; }
 }
 
+async function shareReaderReport() {
+  try {
+    await readerDiagnosticQueue;
+    const saved = await getOne(db, stores.SETTINGS, "nfcDiagnostics");
+    const data = JSON.stringify({ appVersion: "0.8.2", exportedAt: new Date().toISOString(), readerStatus, events: saved?.value || [] }, null, 2);
+    const filename = `patts-nfc-report-${Date.now()}.json`;
+    const filesystem = nativePlugin("Filesystem");
+    const share = nativePlugin("Share");
+    if (filesystem && share) {
+      const file = await filesystem.writeFile({ path: filename, data, directory: "CACHE", encoding: "utf8" });
+      await share.share({ title: "PATTS NFC support report", files: [file.uri], dialogTitle: "Share NFC report with support" });
+    } else if (filesystem) {
+      await filesystem.writeFile({ path: `PATTS Reports/${filename}`, data, directory: "DOCUMENTS", encoding: "utf8", recursive: true });
+      showToast("NFC report saved to Files > Documents > PATTS Reports.");
+    } else {
+      const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url; link.download = filename; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast("NFC report saved to Downloads.");
+    }
+  } catch (error) { showToast(error.message || "The NFC report could not be shared.", "error"); }
+}
+
 async function exportBackup() {
-  const settings = await getAll(db, stores.SETTINGS);
-  const data = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), students, transactions, settings }, null, 2);
-  const filename = `patts-pos-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  const filesystem = nativePlugin("Filesystem");
-  const share = nativePlugin("Share");
-  if (filesystem && share) {
-    const result = await filesystem.writeFile({ path: filename, data, directory: "CACHE", encoding: "utf8" });
-    await share.share({ title: "PATTS POS backup", text: "Student wallet backup. Store this file securely.", url: result.uri, dialogTitle: "Save or share backup" });
-    showToast("Backup ready to save or share.");
-    return;
+  try {
+    const settings = await getAll(db, stores.SETTINGS);
+    const data = JSON.stringify(createBackup({ students, transactions, items, settings }), null, 2);
+    const filename = `patts-pos-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    const filesystem = nativePlugin("Filesystem");
+    if (filesystem) {
+      await filesystem.writeFile({ path: `PATTS Backups/${filename}`, data, directory: "DOCUMENTS", encoding: "utf8", recursive: true });
+      showToast(`Backup saved to Files > Documents > PATTS Backups > ${filename}`);
+      return;
+    }
+    const blob = new Blob([data], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob); link.download = filename; link.click(); URL.revokeObjectURL(link.href);
+    showToast("Backup saved to your Downloads folder.");
+  } catch (error) {
+    showToast(error.message || "The backup could not be saved.", "error");
   }
-  const blob = new Blob([data], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob); link.download = filename; link.click(); URL.revokeObjectURL(link.href);
-  showToast("Backup exported.");
 }
 
 async function restoreBackup(file) {
   try {
-    const backup = JSON.parse(await file.text());
-    if (!Array.isArray(backup.students) || !Array.isArray(backup.transactions) || !Array.isArray(backup.settings)) throw new Error("This is not a valid PATTS POS backup.");
+    const backup = parseBackup(await file.text());
     await clearAndRestore(db, backup);
-    authRecord = await getOne(db, stores.SETTINGS, "auth");
+    authRecord = null;
+    authThrottle = null;
     authenticated = false; operatorName = "";
-    await refreshData(); render(); showToast("Backup restored. Unlock with the restored teller PIN.");
+    activeOrderItems = []; enteredCentavos = ""; activeStudentId = null; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true;
+    await refreshData(); render(); showToast("Backup restored. Create teller access for this device.");
   } catch (error) { showToast(error.message, "error"); } finally { backupInput.value = ""; }
 }
 
 document.addEventListener("click", async (event) => {
+  if (event.target.closest("[data-route]")) setNavigationOpen(false);
   const key = event.target.closest("[data-key]")?.dataset.key;
   if (key !== undefined) return handleKey(key);
-  const quickAmount = event.target.closest("[data-quick-amount]")?.dataset.quickAmount;
-  if (quickAmount) { enteredCentavos = quickAmount; return render(); }
+  const orderControl = event.target.closest("[data-order-adjust]");
+  if (orderControl) {
+    activeOrderItems = adjustOrderLine(activeOrderItems, orderControl.dataset.orderLine, Number(orderControl.dataset.orderAdjust));
+    return render();
+  }
+  const selectedCategory = event.target.closest("[data-item-category]")?.dataset.itemCategory;
+  if (selectedCategory) { itemCategory = selectedCategory; return render(); }
+  const itemId = event.target.closest("[data-item-id]")?.dataset.itemId;
+  if (itemId) {
+    const item = items.find((entry) => entry.id === itemId);
+    if (item) {
+      if (!activeStudentId) return showToast("Tap a registered card or choose a student first.", "error");
+      if (item.transactionType === TRANSACTION_TYPES.TOP_UP) {
+        transactionMode = TRANSACTION_TYPES.TOP_UP;
+        activeOrderItems = [];
+        enteredCentavos = "";
+        checkoutControlsCollapsed = false;
+        render();
+        showToast("Enter the amount to add with the keypad.");
+        return;
+      }
+      if (transactionMode === TRANSACTION_TYPES.TOP_UP) { enteredCentavos = ""; checkoutControlsCollapsed = true; }
+      transactionMode = TRANSACTION_TYPES.PAYMENT;
+      activeOrderItems = addItemToOrder(activeOrderItems, item);
+      render();
+      showToast(`${item.name} added to the order.`);
+    }
+    return;
+  }
   const studentId = event.target.closest("[data-student-id]")?.dataset.studentId;
-  if (studentId) { activeStudentId = studentId; enteredCentavos = ""; return render(); }
-  const openStudent = event.target.closest("[data-open-student]")?.dataset.openStudent;
-  if (openStudent) { activeStudentId = openStudent; location.hash = "wallet"; return; }
+  if (studentId) { studentSelectionRevision++; activeStudentId = studentId; enteredCentavos = ""; activeOrderItems = []; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true; return render(); }
+  const useStudent = event.target.closest("[data-use-student]")?.dataset.useStudent;
+  if (useStudent) { studentSelectionRevision++; activeStudentId = useStudent; enteredCentavos = ""; activeOrderItems = []; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true; location.hash = "wallet"; return; }
+  const editStudent = event.target.closest("[data-edit-student]")?.dataset.editStudent;
+  if (editStudent) return openStudentDialog(null, students.find((student) => student.id === editStudent));
+  const removeStudent = event.target.closest("[data-delete-student]")?.dataset.deleteStudent;
+  if (removeStudent) {
+    const student = students.find((item) => item.id === removeStudent);
+    if (!student) return;
+    const transactionCount = transactions.filter((item) => item.studentId === removeStudent).length;
+    const historyWarning = transactionCount ? ` This will also delete ${transactionCount} transaction record${transactionCount === 1 ? "" : "s"}.` : "";
+    if (!confirm(`Remove ${student.name}'s wallet?${historyWarning} This cannot be undone.`)) return;
+    await deleteStudent(db, removeStudent);
+    if (activeStudentId === removeStudent) activeStudentId = null;
+    if (activityStudentId === removeStudent) activityStudentId = "";
+    await refreshData(); render(); showToast("Student wallet removed."); return;
+  }
+  const editItem = event.target.closest("[data-edit-item]")?.dataset.editItem;
+  if (editItem) return openItemDialog(items.find((item) => item.id === editItem));
+  const deleteItem = event.target.closest("[data-delete-item]")?.dataset.deleteItem;
+  if (deleteItem && confirm("Delete this item from the quick-price list?")) {
+    await deleteOne(db, stores.ITEMS, deleteItem);
+    await refreshData(); render(); showToast("Item deleted."); return;
+  }
   const action = event.target.closest("[data-action]")?.dataset.action;
   if (!action) return;
-  if (action === "payment") return processTransaction(TRANSACTION_TYPES.PAYMENT);
+  if (action === "open-navigation") return setNavigationOpen(true);
+  if (action === "close-navigation") return setNavigationOpen(false);
+  if (action === "payment") return processTransaction(transactionMode);
   if (action === "topup") return processTransaction(TRANSACTION_TYPES.TOP_UP);
+  if (action === "add-manual") {
+    try {
+      if (!activeStudentId) throw new Error("Tap a registered card or choose a student first.");
+      transactionMode = TRANSACTION_TYPES.PAYMENT;
+      activeOrderItems = addManualAmountToOrder(activeOrderItems, Number(enteredCentavos), ++manualLineSequence);
+      enteredCentavos = "";
+      render();
+      showToast("Manual amount added to the order.");
+    } catch (error) { showToast(error.message, "error"); }
+    return;
+  }
+  if (action === "clear-order") { activeOrderItems = []; enteredCentavos = ""; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true; return render(); }
+  if (action === "cancel-topup") { enteredCentavos = ""; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true; return render(); }
+  if (action === "toggle-checkout-controls") { checkoutControlsCollapsed = !checkoutControlsCollapsed; return render(); }
   if (action === "simulate-tap") return simulateTap();
-  if (action === "new-student") { document.querySelector("#student-form-error").textContent = ""; return studentDialog.showModal(); }
-  if (action === "close-dialog") { studentForm.reset(); return studentDialog.close(); }
+  if (action === "connect-reader") return scanCard(false);
+  if (action === "card-repair") return showExistingStudentCardLink(true);
+  if (action === "share-nfc-report") return shareReaderReport();
+  if (action === "card-existing") return showExistingStudentCardLink();
+  if (action === "card-new") {
+    const detectedCard = pendingCard;
+    pendingCard = null;
+    cardDialog.close();
+    requestAnimationFrame(() => openStudentDialog(detectedCard));
+    return;
+  }
+  if (action === "demo-session") {
+    authenticated = true; operatorName = "Demo Teller";
+    document.body.classList.remove("access-locked"); operatorStatus.textContent = "Demo Teller · Lock"; operatorStatus.hidden = false;
+    render(); showToast("Temporary demo session started."); scheduleAutoReader(0); return;
+  }
+  if (action === "new-student") return openStudentDialog();
+  if (action === "close-dialog") { cardForNewStudent = null; editingStudentId = null; studentForm.elements.id.readOnly = false; studentForm.reset(); return studentDialog.close(); }
+  if (action === "new-item") return openItemDialog();
+  if (action === "close-item-dialog") { itemForm.reset(); return itemDialog.close(); }
   if (action === "close-transaction") { pendingTransaction = null; return transactionDialog.close(); }
+  if (action === "close-card-dialog") { pendingCard = null; return cardDialog.close(); }
   if (action === "export") return exportBackup();
   if (action === "import") return backupInput.click();
   if (action === "clear-search") { studentQuery = ""; return render(); }
   if (action === "lock") {
-    authenticated = false; operatorName = ""; enteredCentavos = "";
+    lastCardStudentId = null;
+    authenticated = false; operatorName = ""; enteredCentavos = ""; activeOrderItems = []; activeStudentId = null; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true;
     return render();
   }
-  if (action === "reset" && confirm("Reset all local prototype data? Export a backup first if you need these records.")) { await resetDatabase(db); await refreshData(); render(); showToast("Demo data restored."); }
+  if (action === "reset" && confirm("Reset all local prototype data? Export a backup first if you need these records.")) { await resetDatabase(db); activeOrderItems = []; enteredCentavos = ""; activeStudentId = null; transactionMode = TRANSACTION_TYPES.PAYMENT; checkoutControlsCollapsed = true; await refreshData(); render(); showToast("Demo data restored."); }
 });
 
 document.addEventListener("submit", (event) => {
@@ -401,22 +774,42 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.matches("[data-item-search]")) {
+    itemQuery = event.target.value;
+    const selectionStart = event.target.selectionStart;
+    render();
+    const search = document.querySelector("[data-item-search]");
+    search?.focus();
+    search?.setSelectionRange(selectionStart, selectionStart);
+    return;
+  }
   if (!event.target.matches("[data-student-search]")) return;
   studentQuery = event.target.value;
   const picker = document.querySelector("#student-picker-list");
-  if (picker) picker.innerHTML = renderStudentOptions();
+  if (picker) picker.innerHTML = renderStudentOptions({ students, query: studentQuery, activeStudentId });
   const grid = document.querySelector("#student-grid");
-  if (grid) grid.innerHTML = renderStudentCards();
+  if (grid) grid.innerHTML = renderStudentCards({ students, query: studentQuery });
   const count = document.querySelector("#search-count");
   const total = matchingStudents().length;
   if (count) count.textContent = `${total} result${total === 1 ? "" : "s"}`;
 });
 
+document.addEventListener("change", (event) => {
+  if (!event.target.matches("[data-activity-student]")) return;
+  activityStudentId = event.target.value;
+  render();
+});
+
 studentForm.addEventListener("submit", createStudent);
+itemForm.addEventListener("submit", saveItem);
 transactionForm.addEventListener("submit", commitPendingTransaction);
-transactionDialog.addEventListener("close", () => { pendingTransaction = null; });
+cardForm.addEventListener("submit", enrollCard);
+transactionDialog.addEventListener("close", () => { pendingTransaction = null; pendingOrderCharge = false; });
+cardDialog.addEventListener("close", () => { pendingCard = null; });
+studentDialog.addEventListener("close", () => { cardForNewStudent = null; editingStudentId = null; studentForm.elements.id.readOnly = false; });
 backupInput.addEventListener("change", () => backupInput.files[0] && restoreBackup(backupInput.files[0]));
-window.addEventListener("hashchange", render);
+window.addEventListener("hashchange", () => { setNavigationOpen(false); render(); });
+window.addEventListener("keydown", (event) => { if (event.key === "Escape" && navigationDrawer.classList.contains("is-open")) { setNavigationOpen(false); menuButton.focus(); } });
 window.addEventListener("online", updateConnection);
 window.addEventListener("offline", updateConnection);
 window.addEventListener("beforeinstallprompt", (event) => { event.preventDefault(); deferredInstallPrompt = event; installButton.hidden = false; });
@@ -430,7 +823,7 @@ function updateConnection() {
 
 async function initialize() {
   try {
-    db = await openDatabase(); await seedDatabase(db); authRecord = await getOne(db, stores.SETTINGS, "auth"); await refreshData(); updateConnection(); render();
+    db = await openDatabase(); await seedDatabase(db); authRecord = await getOne(db, stores.SETTINGS, "auth"); authThrottle = await getOne(db, stores.SETTINGS, "authThrottle"); await refreshData(); await updateReaderStatus(); updateConnection(); render(); scheduleAutoReader();
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js");
   } catch (error) {
     app.innerHTML = `<div class="fatal-error"><h1>Unable to open local storage</h1><p>${escapeHtml(error.message)}</p><p>Try allowing site storage in Chrome and reload.</p></div>`;

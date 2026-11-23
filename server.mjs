@@ -1,10 +1,12 @@
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = fileURLToPath(new URL(".", import.meta.url));
+const projectRoot = fileURLToPath(new URL(".", import.meta.url));
+const root = resolve(projectRoot, "www");
 const port = Number(process.env.PATTS_POS_PORT || 4173);
+const host = process.env.PATTS_POS_HOST || "127.0.0.1";
 const types = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -17,9 +19,10 @@ const types = {
 createServer(async (request, response) => {
   try {
     const urlPath = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
-    const relative = normalize(urlPath).replace(/^([/\\])+/, "");
-    let filePath = join(root, relative || "index.html");
-    if (!filePath.startsWith(root)) throw new Error("Invalid path");
+    const requestPath = normalize(urlPath).replace(/^([/\\])+/, "");
+    let filePath = join(root, requestPath || "index.html");
+    const pathFromRoot = relative(root, filePath);
+    if (pathFromRoot.startsWith("..") || pathFromRoot === "..") throw new Error("Invalid path");
     if ((await stat(filePath)).isDirectory()) filePath = join(filePath, "index.html");
     const body = await readFile(filePath);
     response.writeHead(200, {
@@ -32,6 +35,6 @@ createServer(async (request, response) => {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     response.end("Not found");
   }
-}).listen(port, "0.0.0.0", () => {
-  console.log(`PATTS POS running at http://localhost:${port}`);
+}).listen(port, host, () => {
+  console.log(`PATTS POS running at http://${host}:${port}`);
 });

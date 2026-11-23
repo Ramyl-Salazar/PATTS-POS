@@ -12,7 +12,7 @@ test("finds students by partial name regardless of case", () => {
   assert.deepEqual(filterStudents(demoStudents, "soFIA").map((student) => student.id), ["2026-0005"]);
 });
 
-test("finds students by ID or program", () => {
+test("finds students by ID and does not expose removed program data", () => {
   assert.deepEqual(filterStudents(demoStudents, "0019").map((student) => student.name), ["Elena Valdez"]);
-  assert.ok(filterStudents(demoStudents, "avionics").length > 1);
+  assert.deepEqual(filterStudents(demoStudents, "avionics"), []);
 });

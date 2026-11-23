@@ -19,4 +19,3 @@ test("adds and deducts funds using integer arithmetic", () => {
 test("prevents a negative wallet", () => {
   assert.throws(() => calculateBalance(1000, TRANSACTION_TYPES.PAYMENT, 1001), /Insufficient/);
 });
-

@@ -1,35 +1,33 @@
-# How PATTS POS works
-
-PATTS POS is a local prototype for a reloadable student wallet. Its teller interface is available in the browser and bundled into the Android app. The card reader is simulated until hardware integration is tested.
-
-```mermaid
-flowchart LR
-  A[Teller unlocks station with local PIN] --> B[Select student or simulate card tap]
-  B --> C[Enter amount]
-  C --> D{Add funds or deduct payment}
-  D --> E[Review and confirm]
-  E --> F[Validate balance and save transaction]
-  F --> G[(IndexedDB: wallets, audit history, teller settings)]
-  G --> H[Updated balance and activity]
-  G --> I[JSON backup and restore]
-```
-
-## Components and data
+# PATTS POS 0.8.2 architecture
 
 ```mermaid
 flowchart TB
-  UI[HTML, CSS, JavaScript teller UI] --> LOGIC[Wallet and transaction rules]
-  LOGIC --> DB[(IndexedDB on this device)]
-  UI --> PIN[Local teller PIN check]
-  PIN --> DB
-  UI --> BACKUP[Export or restore JSON backup]
-  BACKUP --> DB
-  UI --> SIM[Simulated ID tap]
-  SIM --> DB
-  WEB[Browser] --> UI
-  APK[Capacitor Android app] --> UI
+  Teller[Teller PIN and checkout UI] --> App[app.js state and actions]
+  App --> Views[views.js screens]
+  App --> Rules[wallet, order, cards, checkout rules]
+  Rules --> DB[(IndexedDB on this device)]
+  App --> Backup[JSON backup and restore]
+  Backup --> DB
+  Android[Capacitor Android] --> App
+  Browser[Browser or PWA] --> App
+  Android --> Native[NfcReaderPlugin Java]
+  Browser --> HID[WebHID reader path]
+  Native --> Reader[NFC-X USB card reader]
+  HID --> Reader
+  Reader --> Cards[Read-only card identifier]
+  Cards --> Rules
 ```
 
-The app seeds 20 demonstration wallets on first use. Each confirmed add or deduct action updates the wallet and writes an audit record with the teller name. The backup contains wallet, transaction, and local teller-setting records, so it should be handled as sensitive data even in a pilot.
+## Checkout
 
-There is no server synchronization, real-money settlement, or working RFID/NFC reader. See the [README](../README.md#prototype-limitations) for deployment limits.
+1. Teller unlocks the station with a local PIN.
+2. A card read or manual student selection opens a wallet.
+3. Menu items and manual amounts form an order. Add funds is a separate credit action.
+4. The teller reviews the amount and confirms. The app validates the balance and writes the transaction and new wallet balance atomically to IndexedDB.
+5. Activity records the teller and transaction. A JSON backup can export wallet, item, and transaction data; it excludes the local PIN verifier.
+
+## Reader and repair
+
+Supported NFC-X readers use a read-only USB path on Android. Desktop browsers can use WebHID, and the development emulator can use the local Windows bridge. When no reader is available, the app offers a simulated card tap. Unknown identifiers require explicit enrollment or repair; the teller must select and verify the student. A repaired card keeps its original identifier plus confirmed alternates. The app rejects identifier collisions and limits repair history. Support reports contain reader events and identifiers without student names, balances, or PINs.
+
+The app has no server synchronization or settlement service. Hardware validation on the physical tablet and reader remains necessary.

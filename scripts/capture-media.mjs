@@ -115,16 +115,17 @@ try {
       return false;
     })()`)
     if (!unlocked) throw new Error('Demo teller setup did not complete')
-    await wait(4500)
-    await route(browser.send, 'wallet')
+    await route(browser.send, 'students')
+    await evaluate(browser.send, `document.querySelector('[data-use-student]')?.click(); true`)
+    await wait(500)
     await screenshot(browser.send, 'docs/screenshots/wallet-desktop.png')
-    await evaluate(browser.send, `document.querySelector('[data-quick-amount="5000"]').click(); true`)
-    await evaluate(browser.send, `document.querySelector('[data-action="topup"]').click(); true`)
+    await evaluate(browser.send, `document.querySelector('.menu-item:not(.menu-item-topup)')?.click(); true`)
+    await evaluate(browser.send, `document.querySelector('[data-action="payment"]')?.click(); true`)
     await wait(350)
     await screenshot(browser.send, 'docs/screenshots/transaction-confirmation.png')
     await evaluate(browser.send, `document.querySelector('#confirm-transaction-button').click(); true`)
-    await wait(4500)
-    for (const name of ['students', 'activity', 'settings']) {
+    await wait(500)
+    for (const name of ['students', 'inventory', 'activity', 'settings']) {
       await route(browser.send, name)
       await screenshot(browser.send, `docs/screenshots/${name}-desktop.png`)
     }
@@ -133,8 +134,8 @@ try {
       await route(browser.send, name)
       await screenshot(browser.send, `docs/screenshots/${name}-mobile.png`)
     }
-    await video(browser.send, 'desktop-tour', 1280, 720, ['wallet', 'students', 'activity', 'settings'])
-    await video(browser.send, 'mobile-tour', 390, 844, ['wallet', 'students', 'activity'])
+    await video(browser.send, 'desktop-tour', 1280, 720, ['wallet', 'students', 'inventory', 'activity', 'settings'])
+    await video(browser.send, 'mobile-tour', 390, 844, ['wallet', 'students', 'inventory', 'activity'])
     process.stdout.write('Captured PATTS POS screenshots and videos.\n')
   } finally {
     browser.close()

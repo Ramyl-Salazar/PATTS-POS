@@ -1,7 +1,14 @@
 apply plugin: 'com.android.application'
 
-if (System.getenv('PATTS_ANDROID_APP_BUILD_DIR')) {
-    buildDir = file(System.getenv('PATTS_ANDROID_APP_BUILD_DIR'))
+def configuredBuildDir = System.getenv('PATTS_ANDROID_APP_BUILD_DIR')
+def localAppData = System.getenv('LOCALAPPDATA')
+
+// OneDrive can lock Gradle's generated resource folders on Windows. Keep only
+// generated build output in AppData so Android Studio's Run action is reliable.
+if (configuredBuildDir) {
+    buildDir = file(configuredBuildDir)
+} else if (localAppData) {
+    buildDir = file("${localAppData}/PATTS-POS/android-studio-build/app")
 }
 
 android {
@@ -11,8 +18,8 @@ android {
         applicationId "ph.edu.patts.offlinepos"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "0.2.0"
+        versionCode 10
+        versionName "0.8.2"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
