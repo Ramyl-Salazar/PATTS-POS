@@ -14,7 +14,7 @@ The main screen combines a student wallet, item menu, order summary, and payment
 | --- | --- |
 | ![Item management](docs/screenshots/inventory-desktop.png) | ![Transaction activity](docs/screenshots/activity-desktop.png) |
 
-See the [mobile checkout](docs/screenshots/wallet-mobile.png), [mobile students](docs/screenshots/students-mobile.png), [teller setup](docs/screenshots/teller-setup.png), [payment confirmation](docs/screenshots/transaction-confirmation.png), and [settings](docs/screenshots/settings-desktop.png). Watch the [43-second client demo](docs/videos/client-demo.mp4), [desktop tour](docs/videos/desktop-tour.mp4), or [mobile tour](docs/videos/mobile-tour.mp4). The client demo is captioned and silent; all captures use synthetic demo data.
+See the [mobile checkout](docs/screenshots/wallet-mobile.png), [mobile students](docs/screenshots/students-mobile.png), [teller setup](docs/screenshots/teller-setup.png), [payment confirmation](docs/screenshots/transaction-confirmation.png), and [settings](docs/screenshots/settings-desktop.png). Watch the [44-second client demo](docs/videos/client-demo.mp4), [desktop tour](docs/videos/desktop-tour.mp4), or [mobile tour](docs/videos/mobile-tour.mp4). The client demo follows one 0.8.2 checkout captured at tablet size: a simulated card tap connects a wallet, three items build the order, the teller confirms, and the balance and activity log update. The card tap uses the prototype's built-in demo reader; physical NFC reader hardware is not shown or validated. On-screen captions carry the story with the sound off, and the music is an original synthesized score. All captures use synthetic demo data.
 
 ## How it works
 
